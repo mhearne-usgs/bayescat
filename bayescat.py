@@ -9,6 +9,7 @@ import time
 import glob
 import sqlite3
 import argparse
+import socket
 
 #local
 from libcomcat.comcat import getPhaseData,getEventData
@@ -21,9 +22,14 @@ from obspy import UTCDateTime
 import numpy as np
 from mpl_toolkits.basemap import Basemap
 import matplotlib.pyplot as plt
+from obspy.core.util.geodetics import gps2DistAzimuth
 
+DEFAULT_RADIUS = 15
 NWEEKS = 12
 BAYESLOC = os.path.join(os.path.expanduser('~'),'bayesloc')
+
+CWBHOST = 'cwbpub.cr.usgs.gov'
+CWBPORT = 2052
 
 CONFIG = """// The arrival data and station information:
       Data:
@@ -54,8 +60,8 @@ CONFIG = """// The arrival data and station information:
 
 PHASELIST = ['P', 'Pg', 'Pn', 'pP', 'S', 'Sg', 'Sn', 'sP']
 
-MAGARRAY = np.array([0,2.5,3.0,3.5,4.0,4.5,9.9])
-PICKDIST = np.array([0,5.0,8.0,10.0,18.0,20.0,90.0])
+MAGARRAY = np.array([0,2.0,2.5,3.0,3.5, 4.0, 4.5, 9.9])
+PICKDIST = np.array([0,3.0,6.0,8.0,10.0,12.0,18.0,90.0])
 
 TABLES = {'station':
           {'id':'integer primary key',
@@ -123,25 +129,24 @@ def getMapLines(dmin,dmax):
 
 def getStationCoord(nscl):
     network,station,channel,location = nscl.split('.')
+    scode = 'FDSN.%s.%s' % (network,station)
+    req = '-a %s -c c \n' % scode
+    pad = chr(0) * (80 - len(req))
+    req = str(req + pad)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM,0)
+    s.connect((CWBHOST,CWBPORT))
+    s.send(req)
+    response = s.recv(10241)
+    s.close()
     try:
-        client = Client()
-    except:
-        time.sleep(2)
-        try:
-            client = Client()
-        except:
-            return (None,None,None)
-    try:
-        inventory = client.get_stations(network=network,station=station)
-    except:
-        time.sleep(2)
-        try:
-            inventory = client.get_stations(network=network,station=station)
-        except:
-            return (None,None,None)
-    lat = inventory.networks[0].stations[0].latitude.real
-    lon = inventory.networks[0].stations[0].longitude.real
-    elev = inventory.networks[0].stations[0].elevation.real/1000.0
+        parts = response.split('\n')
+        parts = parts[0].split(':')
+        parts = parts[1].split()
+        lat = float(parts[0])
+        lon = float(parts[1])
+        elev = float(parts[2])/1000.0
+    except Exception,msg:
+        return (None,None,None)
     return (lat,lon,elev)
 
 def makeMap(eventdict,newdict,bounds,lat,lon,eventfolder):
@@ -333,13 +338,14 @@ def insertPhaseData(phasedata,db,cursor):
     cursor.execute(iquery)
     row = cursor.fetchone()
     eventid = row[0]
-    imag = ((mag - MAGARRAY) > 0).argmax()+1
+    mdiff = mag - MAGARRAY
+    mdiff[mdiff < 0] = np.nan
+    imag = mdiff.argmin()
     pdist = PICKDIST[imag]
     for phase in phasedata.phases:
         nscl = phase['nscl']
         distance = phase['distance']
         if distance > pdist:
-            print 'Skipping far station'
             continue
         squery = 'SELECT id,lat,lon,elev FROM station WHERE nscl = "%s"' % nscl
         cursor.execute(squery)
@@ -369,10 +375,42 @@ def insertPhaseData(phasedata,db,cursor):
         pquery = pfmt % (sid,eventid,phase,time)
         cursor.execute(pquery)
         db.commit()
-        arrivals.append((eventid,nscl,phase,UTCDateTime(time).timestamp))
+        arrivals.append((eventid,nscl,phase,UTCDateTime(ptime).timestamp))
     return (stations,arrivals,missing_stations)
 
-def main(eventid,radius,startOver=False):
+def getStats(cursor):
+    query = 'SELECT count(*) FROM event'
+    cursor.execute(query)
+    nevents = cursor.fetchone()[0]
+    query = 'SELECT count(*) FROM station'
+    cursor.execute(query)
+    nstations = cursor.fetchone()[0]
+    query = 'SELECT count(*) FROM phase'
+    cursor.execute(query)
+    narrivals = cursor.fetchone()[0]
+    return (nevents,nstations,narrivals)
+
+def deleteEvents(db,cursor,eventcodes):
+    nevents = 0
+    for eventcode in eventcodes:
+        query = 'SELECT id FROM event WHERE code="%s"' % eventcode
+        cursor.execute(query)
+        row = cursor.fetchone()
+        if row is None:
+            continue
+        eid = row[0]
+        query2 = 'DELETE FROM phase WHERE eid=%i' % eid
+        cursor.execute(query2)
+        db.commit()
+        query3 = 'DELETE FROM event WHERE id=%i' % eid
+        cursor.execute(query3)
+        db.commit()
+        nevents += 1
+    return nevents
+
+def main(args):
+    eventid = args.id
+    radius = args.radius
     #does the bayesloc folder exist?
     if not os.path.isdir(BAYESDIR):
         print FOLDER_ERROR
@@ -386,8 +424,8 @@ def main(eventid,radius,startOver=False):
         print FOLDER_ERROR
         sys.exit(1)
     bayesdb = os.path.join(BAYESDIR,BAYESDB)
-    if startOver and os.path.isfile(bayesdb):
-        os.remove(bayesdb)
+    # if startOver and os.path.isfile(bayesdb):
+    #     os.remove(bayesdb)
     #does the database exist - if not, create it
     if not os.path.isfile(bayesdb):
         db = sqlite3.connect(bayesdb)
@@ -397,14 +435,21 @@ def main(eventid,radius,startOver=False):
         db = sqlite3.connect(bayesdb)
         cursor = db.cursor()
 
-    #check to see if event has already been located - if so, stop
-    sql = 'SELECT id,code,rlat,rlon,rdepth,rtime FROM event WHERE code="%s"' % eventid
-    cursor.execute(sql)
-    row = cursor.fetchone()
-    if row is not None and row[2] is not None:
-        print 'Event %s is already in the database.  Stopping.'
+    #Delete selected list of events
+    if args.delete:
+        nevents = deleteEvents(db,cursor,args.delete)
+        print '%i events deleted from the database.' % nevents
         sys.exit(0)
-
+        
+    #Return some stats about the current database
+    if args.stats:
+        nevents,nstations,narrivals = getStats(cursor)
+        print 'Your database contains information about:'
+        print '\t%i events' % nevents
+        print '\t%i stations' % nstations
+        print '\t%i picks' % narrivals
+        sys.exit(0)
+        
     eventinfo = getPhaseData(eventid=eventid)
     if not len(eventinfo):
         print 'Could not find event %s in ComCat.  Returning.'
@@ -423,6 +468,20 @@ def main(eventid,radius,startOver=False):
     eventlist = getEventData(radius=(lat,lon,0,radius),
                              starttime=datetime(1900,1,1),
                              endtime=datetime.utcnow())
+    if args.count:
+        fmt = 'There are %i events inside %.1f km radius around event %s (%.4f,%.4f)'
+        print fmt % (len(eventlist),radius,eventid,lat,lon)
+        sys.exit(0)
+    
+    #check to see if event has already been located - if so, stop, unless we're being forced
+    if not args.force:
+        sql = 'SELECT id,code,rlat,rlon,rdepth,rtime FROM event WHERE code="%s"' % eventid
+        cursor.execute(sql)
+        row = cursor.fetchone()
+        if row is not None and row[2] is not None:
+            print 'Event %s is already in the database.  Stopping.' % eventid
+            sys.exit(0)
+    
     priors = getEventPriors(eventlist,cursor)
     stations,arrivals,newevents = getProcessedData(eventlist,db,cursor,ndays=NWEEKS*7)
     fmt = 'In database: %i stations, %i arrivals.  %i events not in db.'
@@ -446,7 +505,7 @@ def main(eventid,radius,startOver=False):
     f.write('sta_id lat lon elev\n')
     for stationcode,stationvals in stations.iteritems():
         slat,slon,elev = stationvals
-        f.write('%s %.4f %.4f %.1f\n' % (stationcode,slat,slon,elev))
+        f.write('%s %.4f %.4f %.3f\n' % (stationcode,slat,slon,elev))
     f.close()
 
     arrfile = 'arrival.dat'
@@ -481,7 +540,7 @@ def main(eventid,radius,startOver=False):
     os.chdir(eventfolder)
     bayesbin = os.path.join(BAYESLOC,'bin','bayesloc')
     cmd = '%s %s' % (bayesbin,configfile)
-    print 'Running command %s' % cmd
+    print 'Running command %s...' % cmd
     t1 = datetime.now()
     res,stdout,stderr = getCommandOutput(cmd)
     t2 = datetime.now()
@@ -508,16 +567,46 @@ def main(eventid,radius,startOver=False):
         cursor.execute(equery)
         db.commit()
     f.close()
-    
+
+    #tell the user what happened with the relocation
+    fmt = 'SELECT lat,lon,depth,time,rlat,rlon,rdepth,rtime FROM event WHERE code="%s"'
+    query = fmt % (eventid)
+    cursor.execute(query)
+    row = cursor.fetchone()
+    lat,lon,depth,time,rlat,rlon,rdepth,rtime = row
+    time = UTCDateTime(time).datetime
+    rtime = UTCDateTime(rtime).datetime
+    if rtime >= time:
+        dt = (rtime-time).seconds + ((rtime-time).microseconds)/float(1e6)
+    else:
+        dt = (time-rtime).seconds + ((time-rtime).microseconds)/float(1e6)
+    dd,az1,az2 = gps2DistAzimuth(lat,lon,rlat,rlon)
+    dd /= 1000.0
+    print 'Event moved from:'
+    print '%s (%.4f,%.4f) %.1f km' % (time.strftime('%Y-%m-%d %H:%M:%S'),lat,lon,depth)
+    print '%s (%.4f,%.4f) %.1f km' % (rtime.strftime('%Y-%m-%d %H:%M:%S'),rlat,rlon,rdepth)
+    print '%.1f km, %.1f seconds' % (dd,dt)
     cursor.close()
     db.close()
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('integers', metavar='N', type=int, nargs='+',
-                        help='an integer for the accumulator')
-    eventid = sys.argv[1]
-    radius = float(sys.argv[2])
-    main(eventid,radius)
+    desc = '''Use BayesLoc to help automate the creation of a relocated earthquake catalog.
+    ''' 
+    parser = argparse.ArgumentParser(description=desc,
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-i','--id', 
+                        help='The NEIC event ID to relocate')
+    parser.add_argument('-r','--radius', default=DEFAULT_RADIUS,type=float,
+                        help='The radial search distance.')
+    parser.add_argument('-s','--stats', action='store_true',
+                        help='Display database statistics (number of events, stations, etc.)')
+    parser.add_argument('-c','--count', action='store_true',
+                        help='Display number of events in search radius.')
+    parser.add_argument('-f','--force', action='store_true',
+                        help='Force relocation of an already relocated event.')
+    parser.add_argument('-d','--delete', nargs='*',
+                        help='Delete event(s) from database.')
+    pargs = parser.parse_args()
+    main(pargs)
     
 
