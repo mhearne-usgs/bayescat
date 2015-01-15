@@ -14,7 +14,7 @@ TODO
  * Set a radius limit not to be exceeded
  * Set a minimum threshold number of events needed for proper re-location
  * Save number of events used for each events re-location
- * Print out relocation direction
+ * Add priors
 
 
 Installation and Dependencies
