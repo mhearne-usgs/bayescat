@@ -8,6 +8,14 @@ and the NEIC Comprehensive Catalog (ComCat) to allow the user to build
 a local re-located earthquake catalog using NEIC events with Phase
 Data as input.
 
+TODO
+----
+ * Limit the number of events returned in a search (probably by restricting radius)
+ * Set a radius limit not to be exceeded
+ * Set a minimum threshold number of events needed for proper re-location
+ * Make map of all events relocated for each run
+ * Save number of events used for each events re-location
+ * Print out relocation direction
 
 
 Installation and Dependencies
@@ -16,7 +24,8 @@ Installation and Dependencies
 This package depends on:
  * numpy, the fundamental package for scientific computing with Python. <a href="http://www.numpy.org/">http://www.numpy.org/</a>  
  * matplotlib, a Python 2D plotting library which produces publication quality figures. <a href="<a href="http://matplotlib.org/index.html">http://matplotlib.org/index.html</a>
- * obspy, a Seismological data processing package.  <a href="<a href="https://github.com/obspy/obspy/wiki">https://github.com/obspy/obspy/wiki</a>
+ * basemap, a mapping package built on top of matplotlib. <a href="http://matplotlib.org/basemap/">http://matplotlib.org/basemap/</a>
+ * obspy, a Seismological data processing package.  <a href="https://github.com/obspy/obspy/wiki">https://github.com/obspy/obspy/wiki</a>
  * libcomcat, an NEIC package for retrieving data from ComCat.
  * neicio, an NEIC package with a module for running external commands.
  * neicutil, an NEIC package with a module for manipulating text representations of numbers.
@@ -33,6 +42,16 @@ managing Python packages.  You will use pip to install the other dependencies an
  
 You may need to open a new terminal window to ensure that the newly installed versions of python and pip
 are in your path.
+
+To install basemap:
+
+If you are using anaconda (see above):
+
+conda install basemap
+
+Otherwise, see the installation instructions here:
+
+http://matplotlib.org/basemap/users/installing.html
 
 To install obspy:
 

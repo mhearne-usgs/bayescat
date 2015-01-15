@@ -10,6 +10,7 @@ import glob
 import sqlite3
 import argparse
 import socket
+import subprocess
 
 #local
 from libcomcat.comcat import getPhaseData,getEventData
@@ -25,6 +26,8 @@ import matplotlib.pyplot as plt
 from obspy.core.util.geodetics import gps2DistAzimuth
 
 DEFAULT_RADIUS = 15
+DEFAULT_START = datetime(1981,1,31,0,0,0)
+DEFAULT_END = datetime.utcnow()
 NWEEKS = 12
 BAYESLOC = os.path.join(os.path.expanduser('~'),'bayesloc')
 
@@ -91,10 +94,24 @@ BAYESDIR = os.path.join(os.path.expanduser('~'),'bayesloc')
 BAYESDB = 'bayes.db'
 BAYESBIN = 'bayesloc'
 
+TIMEFMT = '%Y-%m-%dT%H:%M:%S'
+DATEFMT = '%Y-%m-%d'
+
 FOLDER_ERROR = '''You must create a folder called %s.  Under it, you must have the following contents:
   bin/bayesloc (BayesLoc executable)
   ttimes/ak135.* (Travel times files)''' % BAYESDIR
 
+def maketime(timestring):
+    outtime = None
+    try:
+        outtime = datetime.strptime(timestring,TIMEFMT)
+    except:
+        try:
+            outtime = datetime.strptime(timestring,DATEFMT)
+        except:
+            raise Exception,'Could not parse time or date from %s' % timestring
+    return outtime
+  
 def createTables(db,cursor):
     for table in TABLES.keys():
         sql = 'CREATE TABLE %s (' % table
@@ -133,11 +150,22 @@ def getStationCoord(nscl):
     req = '-a %s -c c \n' % scode
     pad = chr(0) * (80 - len(req))
     req = str(req + pad)
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM,0)
-    s.connect((CWBHOST,CWBPORT))
-    s.send(req)
-    response = s.recv(10241)
-    s.close()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM,0)
+        s.connect((CWBHOST,CWBPORT))
+        s.send(req)
+        response = s.recv(10241)
+        s.close()
+    except Exception,msg:
+        try:
+            time.sleep(2)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM,0)
+            s.connect((CWBHOST,CWBPORT))
+            s.send(req)
+            response = s.recv(10241)
+            s.close()
+        except:
+            return (None,None,None)
     try:
         parts = response.split('\n')
         parts = parts[0].split(':')
@@ -149,8 +177,25 @@ def getStationCoord(nscl):
         return (None,None,None)
     return (lat,lon,elev)
 
-def makeMap(eventdict,newdict,bounds,lat,lon,eventfolder):
-    xmin,xmax,ymin,ymax = bounds
+def makeMap(eventlist,lat,lon,eventfolder):
+    xmin = ymin = 1e9
+    xmax = ymax = -1e9
+    ymin = min([min(f['lat'],f['rlat']) for f in eventlist])
+    ymax = max([max(f['lat'],f['rlat']) for f in eventlist])
+    xmin = min([min(f['lon'],f['rlon']) for f in eventlist])
+    xmax = max([max(f['lon'],f['rlon']) for f in eventlist])
+
+    #often the map is too zoomed in to these events, lacking geographic context
+    #increase the x/y range of the map so that our events occupy the middle third of it in both dimensions
+    x_range = xmax-xmin
+    y_range = ymax-ymin
+    newxrange = x_range * 3
+    newyrange = y_range * 3
+    xmin = xmin - (newxrange-x_range)/2.0
+    xmax = xmax + (newxrange-x_range)/2.0
+    ymin = ymin - (newyrange-y_range)/2.0
+    ymax = ymax + (newyrange-y_range)/2.0
+    
     #Map the input events against outputs
     clat = ymin + (ymax-ymin)/2.0
     fig = plt.figure(figsize=(8,8))
@@ -176,9 +221,11 @@ def makeMap(eventdict,newdict,bounds,lat,lon,eventfolder):
                              linewidth=0.5,color='cyan',yoffset=yoff,xoffset=xoff,dashes=[1,0.01])
     
     bmap.drawmapboundary(color='k',linewidth=2.0)
-    for evid,value in eventdict.iteritems():
-        ecode,lat1,lon1,depth1,time1,mag = value
-        lat2,lon2,depth2,time2 = newdict[evid]
+    for event in eventlist:
+        lat1 = event['lat']
+        lon1 = event['lon']
+        lat2 = event['rlat']
+        lon2 = event['rlon']
         bx1,by1 = bmap(lon1,lat1)
         bx2,by2 = bmap(lon2,lat2)
         dx2 = (bx2-bx1)*(bx2-bx1)
@@ -267,7 +314,8 @@ def getEventPriors(eventlist,cursor):
     sql = 'SELECT id,rlat,rlon,rdepth,rtime FROM event WHERE code="%s"'
     priors = []
     for event in eventlist:
-        cursor.execute(sql % event['id'])
+        query = sql % event['id']
+        cursor.execute(query)
         row = cursor.fetchone()
         if row is not None and row[1] is not None:
             eid = row[0]
@@ -457,20 +505,30 @@ def main(args):
 
     #get the information about the input event
     eventinfo = eventinfo[0]
-    lat = eventinfo.origins[0]['lat']
-    lon = eventinfo.origins[0]['lon']
-    tnow = datetime.utcnow()
+    eventlat = eventinfo.origins[0]['lat']
+    eventlon = eventinfo.origins[0]['lon']
+    eventtime = eventinfo.origins[0]['time']
+    if eventtime < args.begindate or eventtime > args.enddate:
+        fmt = 'Event %s (%s) is outside the time bounds you specified. %s to %s.  Exiting.' 
+        print fmt % (eventinfo.eventcode,eventtime,args.begindate,args.enddate)
+        sys.exit(1)
 
+    tnow = datetime.utcnow()
     eventfolder = os.path.join(BAYESDIR,'events',eventid)
     if not os.path.isdir(eventfolder):
         os.makedirs(eventfolder)
 
-    eventlist = getEventData(radius=(lat,lon,0,radius),
-                             starttime=datetime(1900,1,1),
-                             endtime=datetime.utcnow())
+    eventlist1 = getEventData(radius=(eventlat,eventlon,0,radius),
+                             starttime=args.begindate,
+                             endtime=args.enddate,catalog='pde')
+    eventlist2 = getEventData(radius=(eventlat,eventlon,0,radius),
+                              starttime=args.begindate,
+                              endtime=args.enddate,catalog='us')
+    eventlist = eventlist1 + eventlist2
+
     if args.count:
         fmt = 'There are %i events inside %.1f km radius around event %s (%.4f,%.4f)'
-        print fmt % (len(eventlist),radius,eventid,lat,lon)
+        print fmt % (len(eventlist),radius,eventid,eventlat,eventlon)
         sys.exit(0)
     
     #check to see if event has already been located - if so, stop, unless we're being forced
@@ -485,11 +543,13 @@ def main(args):
     priors = getEventPriors(eventlist,cursor)
     stations,arrivals,newevents = getProcessedData(eventlist,db,cursor,ndays=NWEEKS*7)
     fmt = 'In database: %i stations, %i arrivals.  %i events not in db.'
-    print fmt % (len(stations),len(arrivals),len(newevents))
+    #print fmt % (len(stations),len(arrivals),len(newevents))
     missing_stations = []
     for event in newevents:
         phasedata = getPhaseData(eventid=event)
         if phasedata is None:
+            continue
+        if not len(phasedata[0].magnitudes):
             continue
         newstations,newarrivals,ms = insertPhaseData(phasedata[0],db,cursor)
         stations = dict(stations.items() + newstations.items())
@@ -542,6 +602,9 @@ def main(args):
     cmd = '%s %s' % (bayesbin,configfile)
     print 'Running command %s...' % cmd
     t1 = datetime.now()
+    # process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    # for c in iter(lambda: process.stdout.read(1), ''):
+    #     sys.stderr.write(c)
     res,stdout,stderr = getCommandOutput(cmd)
     t2 = datetime.now()
     if not res:
@@ -555,6 +618,8 @@ def main(args):
     resultfile = os.path.join(eventfolder,'output','origins_ned_stats.out')
     f = open(resultfile,'rt')
     f.readline()
+    eventlist = []
+    fieldlist = ['lat','lon','depth','time','rlat','rlon','rdepth','rtime','mag']
     for line in f.readlines():
         parts = line.split()
         eid = int(parts[0])
@@ -566,8 +631,16 @@ def main(args):
         equery = efmt % (lat,lon,depth,time,eid)
         cursor.execute(equery)
         db.commit()
+        query = 'SELECT %s FROM event WHERE id=%i' % (','.join(fieldlist),eid)
+        cursor.execute(query)
+        row = cursor.fetchone()
+        eventlist.append(dict(zip(fieldlist,row)))
     f.close()
 
+    #make a map of all the relocated events
+    fname = makeMap(eventlist,eventlat,eventlon,eventfolder)
+    print 'Relocated events: %s' % fname
+    
     #tell the user what happened with the relocation
     fmt = 'SELECT lat,lon,depth,time,rlat,rlon,rdepth,rtime FROM event WHERE code="%s"'
     query = fmt % (eventid)
@@ -585,7 +658,7 @@ def main(args):
     print 'Event moved from:'
     print '%s (%.4f,%.4f) %.1f km' % (time.strftime('%Y-%m-%d %H:%M:%S'),lat,lon,depth)
     print '%s (%.4f,%.4f) %.1f km' % (rtime.strftime('%Y-%m-%d %H:%M:%S'),rlat,rlon,rdepth)
-    print '%.1f km, %.1f seconds' % (dd,dt)
+    print '%.1f km (%.1f degrees), %.1f seconds' % (dd,az1,dt)
     cursor.close()
     db.close()
 
@@ -606,6 +679,11 @@ if __name__ == '__main__':
                         help='Force relocation of an already relocated event.')
     parser.add_argument('-d','--delete', nargs='*',
                         help='Delete event(s) from database.')
+    parser.add_argument('-b','--begindate', default=DEFAULT_START,type=maketime,
+                        help='Start time for search (defaults to %s).  YYYY-mm-dd or YYYY-mm-ddTHH:MM:SS' % DEFAULT_START)
+    parser.add_argument('-e','--enddate', default=DEFAULT_END,type=maketime,
+                        help='End time for search (defaults to now).  YYYY-mm-dd or YYYY-mm-ddTHH:MM:SS')
+    
     pargs = parser.parse_args()
     main(pargs)
     
