@@ -20,7 +20,6 @@ TODO
 Installation and Dependencies
 -----------------------------
 
-
 This package depends on:
  * numpy, the fundamental package for scientific computing with Python. <a href="http://www.numpy.org/">http://www.numpy.org/</a>  
  * matplotlib, a Python 2D plotting library which produces publication quality figures. <a href="<a href="http://matplotlib.org/index.html">http://matplotlib.org/index.html</a>
