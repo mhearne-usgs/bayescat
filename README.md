@@ -81,7 +81,7 @@ pip uninstall bayescat
 
 To update:
 
-pip install git+git://github.com/mhearne-usgs/bayescat.git
+pip install -U git+git://github.com/mhearne-usgs/bayescat.git
 
 Configuration
 -------------
