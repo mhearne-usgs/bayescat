@@ -83,7 +83,8 @@ TABLES = {'station':
             'rlat':'float',
             'rlon':'float',
             'rdepth':'float',
-            'rtime':'datetime'},
+            'rtime':'datetime',
+            'nevents':'integer'},
           'phase':
            {'sid':'int',
             'eid':'int',
@@ -518,13 +519,13 @@ def main(args):
     if not os.path.isdir(eventfolder):
         os.makedirs(eventfolder)
 
-    eventlist1 = getEventData(radius=(eventlat,eventlon,0,radius),
-                             starttime=args.begindate,
-                             endtime=args.enddate,catalog='pde')
-    eventlist2 = getEventData(radius=(eventlat,eventlon,0,radius),
+    # eventlist1 = getEventData(radius=(eventlat,eventlon,0,radius),
+    #                          starttime=args.begindate,
+    #                          endtime=args.enddate,catalog='pde')
+    eventlist = getEventData(radius=(eventlat,eventlon,0,radius),
                               starttime=args.begindate,
                               endtime=args.enddate,catalog='us')
-    eventlist = eventlist1 + eventlist2
+    #eventlist = eventlist1 + eventlist2
 
     if args.count:
         fmt = 'There are %i events inside %.1f km radius around event %s (%.4f,%.4f)'
@@ -619,7 +620,8 @@ def main(args):
     f = open(resultfile,'rt')
     f.readline()
     eventlist = []
-    fieldlist = ['lat','lon','depth','time','rlat','rlon','rdepth','rtime','mag']
+    fieldlist = ['lat','lon','depth','time','rlat','rlon','rdepth','rtime','mag','nevents']
+    nevents = len(priors) + len(newevents)
     for line in f.readlines():
         parts = line.split()
         eid = int(parts[0])
@@ -627,8 +629,8 @@ def main(args):
         lon = float(parts[2])
         depth = float(parts[3])
         time = UTCDateTime(float(parts[4])).datetime
-        efmt = 'UPDATE event set rlat=%.4f,rlon=%.4f,rdepth=%.1f,rtime="%s" WHERE id=%i'
-        equery = efmt % (lat,lon,depth,time,eid)
+        efmt = 'UPDATE event set rlat=%.4f,rlon=%.4f,rdepth=%.1f,rtime="%s",nevents=%i WHERE id=%i'
+        equery = efmt % (lat,lon,depth,time,nevents,eid)
         cursor.execute(equery)
         db.commit()
         query = 'SELECT %s FROM event WHERE id=%i' % (','.join(fieldlist),eid)
@@ -642,11 +644,11 @@ def main(args):
     print 'Relocated events: %s' % fname
     
     #tell the user what happened with the relocation
-    fmt = 'SELECT lat,lon,depth,time,rlat,rlon,rdepth,rtime FROM event WHERE code="%s"'
+    fmt = 'SELECT lat,lon,depth,time,rlat,rlon,rdepth,rtime,nevents FROM event WHERE code="%s"'
     query = fmt % (eventid)
     cursor.execute(query)
     row = cursor.fetchone()
-    lat,lon,depth,time,rlat,rlon,rdepth,rtime = row
+    lat,lon,depth,time,rlat,rlon,rdepth,rtime,nevents = row
     time = UTCDateTime(time).datetime
     rtime = UTCDateTime(rtime).datetime
     if rtime >= time:
@@ -655,9 +657,9 @@ def main(args):
         dt = (time-rtime).seconds + ((time-rtime).microseconds)/float(1e6)
     dd,az1,az2 = gps2DistAzimuth(lat,lon,rlat,rlon)
     dd /= 1000.0
-    print 'Event moved from:'
-    print '%s (%.4f,%.4f) %.1f km' % (time.strftime('%Y-%m-%d %H:%M:%S'),lat,lon,depth)
-    print '%s (%.4f,%.4f) %.1f km' % (rtime.strftime('%Y-%m-%d %H:%M:%S'),rlat,rlon,rdepth)
+    print 'Event %s was relocated using %i events.' % (eventid,nevents)
+    print 'Starting:  %s (%.4f,%.4f) %.1f km' % (time.strftime('%Y-%m-%d %H:%M:%S'),lat,lon,depth)
+    print 'Relocated: %s (%.4f,%.4f) %.1f km' % (rtime.strftime('%Y-%m-%d %H:%M:%S'),rlat,rlon,rdepth)
     print '%.1f km (%.1f degrees), %.1f seconds' % (dd,az1,dt)
     cursor.close()
     db.close()
